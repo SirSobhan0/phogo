@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
-	_ "image/jpeg" // Register JPEG decoder
-	_ "image/png"  // Register PNG decoder
+	_ "image/jpeg"
+	_ "image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,13 +91,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h, v := appStyle.GetFrameSize()
 		m.list.SetSize(msg.Width-h, msg.Height-v)
 		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - 3 // Leave room for header/help
+		m.viewport.Height = msg.Height - 3 
 
 	// Key Press Events
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
-			// If viewing image, ESC/q goes back to list
 			if m.state != stateBrowsing {
 				m.state = stateBrowsing
 				m.statusMsg = ""
@@ -106,7 +105,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
-		// Specific Logic based on current State
 		switch m.state {
 
 		// 1. BROWSING FILE LIST
@@ -171,7 +169,6 @@ func getFiles(dir string) []list.Item {
 	for _, e := range entries {
 		if !e.IsDir() {
 			ext := strings.ToLower(filepath.Ext(e.Name()))
-			// Only include common image extensions
 			if ext == ".png" || ext == ".jpg" || ext == ".jpeg" {
 				info, _ := e.Info()
 				items = append(items, item{
@@ -192,11 +189,10 @@ func renderImage(path string, w, h int) (string, error) {
 	convertOptions := convert.DefaultOptions
 	convertOptions.FixedWidth = w
 	convertOptions.FixedHeight = h
-	convertOptions.Colored = true // Essential for looking like a photo
+	convertOptions.Colored = true
 
 	converter := convert.NewImageConverter()
 
-	// Use the corrected method and return signature
 	return converter.ImageFile2ASCIIString(path, &convertOptions), nil
 }
 
