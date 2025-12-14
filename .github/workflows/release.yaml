@@ -1,4 +1,4 @@
-name: Build and Release Gotodo
+name: Build and Release phogo
 
 on:
   push:
@@ -27,22 +27,22 @@ jobs:
           mkdir -p build
           EXT=""
           if [[ "${{ matrix.os }}" == "windows" ]]; then EXT=".exe"; fi
-          GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build -o build/Gotodo-${{ matrix.os }}-${{ matrix.arch }}${EXT} main.go
+          GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build -o build/phogo-${{ matrix.os }}-${{ matrix.arch }}${EXT} main.go
 
       - name: Archive binary
         run: |
           cd build
           EXT=""
           if [[ "${{ matrix.os }}" == "windows" ]]; then EXT=".exe"; fi
-          FILENAME=Gotodo-${{ matrix.os }}-${{ matrix.arch }}${EXT}
-          zip ${{ runner.temp }}/Gotodo-${{ matrix.os }}-${{ matrix.arch }}.zip $FILENAME
+          FILENAME=phogo-${{ matrix.os }}-${{ matrix.arch }}${EXT}
+          zip ${{ runner.temp }}/phogo-${{ matrix.os }}-${{ matrix.arch }}.zip $FILENAME
         shell: bash
 
       - name: Upload artifact for release
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.os }}-${{ matrix.arch }}-binary
-          path: ${{ runner.temp }}/Gotodo-${{ matrix.os }}-${{ matrix.arch }}.zip
+          path: ${{ runner.temp }}/phogo-${{ matrix.os }}-${{ matrix.arch }}.zip
 
   release:
     needs: build
