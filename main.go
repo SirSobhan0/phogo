@@ -16,8 +16,6 @@ import (
 	"github.com/qeesung/image2ascii/convert"
 )
 
-// --- Enums, Constants, and Configuration ---
-
 type sessionState int
 
 const (
@@ -28,13 +26,11 @@ const (
 	stateFilterSelection 
 )
 
-// Configuration options for filters
 const (
-	// Filters
 	FilterColor    = "Color"
 	FilterGrayscale = "Grayscale"
 	FilterInverted = "Inverted"
-	FilterDuotone  = "Duotone" // High Contrast Monochrome
+	FilterDuotone  = "Duotone"
 )
 
 var (
@@ -54,8 +50,6 @@ var (
 	filterTitleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF88FF"))
 )
 
-// --- Custom Items for the File List / Filter List ---
-
 type item struct {
 	title, desc string
 	fileName    string
@@ -71,8 +65,6 @@ func (i item) Title() string {
 func (i item) Description() string { return i.desc }
 func (i item) FilterValue() string { return i.title } 
 
-// --- Filter Item Struct ---
-
 type filterItem struct {
 	id string
 	desc string
@@ -82,8 +74,6 @@ func (f filterItem) Title() string { return f.id }
 func (f filterItem) Description() string { return f.desc }
 func (f filterItem) FilterValue() string { return f.id }
 
-
-// --- Main Model ---
 
 type model struct {
 	state          sessionState
@@ -98,7 +88,6 @@ type model struct {
 	imgContent     string 
 	prevDirState   sessionState 
 
-	// Filter fields
 	filterMode     string 
 	filterList     list.Model 
 }
@@ -106,7 +95,6 @@ type model struct {
 func initialModel() model {
 	currentDir, _ := os.Getwd()
     
-	// 1. Setup File List 
 	l := list.New(getFiles(currentDir, false, "", false), list.NewDefaultDelegate(), 0, 0)
 	l.Title = "Local Photo Viewer"
 	l.SetShowStatusBar(false)
@@ -114,22 +102,19 @@ func initialModel() model {
 	l.KeyMap.Filter.SetKeys() 
 	l.KeyMap.Quit.SetKeys("q", "ctrl+c")
 
-	// 2. Setup Search Input
 	ti := textinput.New()
 	ti.Placeholder = "Search files or folders..."
 	ti.Focus()
 	ti.CharLimit = 100
 	ti.Width = 30
 	
-	// 3. Setup Viewport 
 	vp := viewport.New(0, 0)
 
-	// 4. Setup Filter Selection List
 	fList := list.New([]list.Item{
 		filterItem{id: FilterColor, desc: "Renders the photo in full, true color."},
 		filterItem{id: FilterInverted, desc: "Renders the photo with inverted colors (negative effect)."},
 		filterItem{id: FilterGrayscale, desc: "Renders the photo in smooth shades of gray (monochrome)."},
-		filterItem{id: FilterDuotone, desc: "Renders the photo in high-contrast black and white (duotone effect)."},
+		filterItem{id: FilterDuotone, desc: "Renders the photo in high-contrast black and white."},
 	}, list.NewDefaultDelegate(), 0, 0)
 	fList.Title = filterTitleStyle.Render("Select Image Filter (Press Enter)")
 	fList.SetShowFilter(false)
@@ -162,8 +147,6 @@ func (m model) Init() tea.Cmd {
 	return nil
 }
 
-// --- Directory Setting Logic / List Reload Helpers ---
-
 func (m *model) finalizeDirectoryChange(newPath string) {
 	m.currentDir = newPath
 	m.reloadImageList()
@@ -182,8 +165,6 @@ func (m *model) reloadDirList() {
 }
 
 
-// --- Update Loop ---
-
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	var cmds []tea.Cmd
@@ -191,7 +172,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		h, v := appStyle.GetFrameSize()
-		// Adjust list size based on state (Search input takes up space)
 		if m.state == stateSearching {
 			m.list.SetSize(msg.Width-h, msg.Height-v-4)
 		} else {
@@ -203,7 +183,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 
 	case tea.KeyMsg:
-		// Global quit/back (q/ctrl+c) logic remains
 		if msg.String() == "ctrl+c" || (msg.String() == "q" && m.state != stateSearching) {
 			if m.state != stateBrowsing {
 				m.state = stateBrowsing
@@ -215,7 +194,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch m.state {
 
-		// 1. IMAGE BROWSING MODE
 		case stateBrowsing:
 			switch msg.String() {
 			case "enter":
@@ -224,7 +202,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					itm := selectedItem.(item)
 					filePath := filepath.Join(m.currentDir, itm.fileName) 
 					
-					// Pass the filter mode
 					str, err := renderImage(filePath, m.viewport.Width, m.viewport.Height, m.filterMode)
 					if err != nil {
 						m.statusMsg = "Error: " + err.Error()
@@ -249,7 +226,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showHidden = !m.showHidden
 				m.reloadImageList()
 				m.statusMsg = fmt.Sprintf("Show Hidden Files: %t", m.showHidden)
-			case "f": // Key for filter selection
+			case "f": 
 				m.state = stateFilterSelection
 				m.filterList.Select(findItemIndex(m.filterList.Items(), m.filterMode))
 				return m, nil
@@ -260,7 +237,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 
-		// 2. IMAGE VIEWER MODE
 		case stateViewingImage:
 			switch msg.String() {
 			case "esc":
@@ -271,7 +247,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
             
-		// 3. DIRECTORY BROWSING MODE
 		case stateDirBrowsing:
 			switch msg.String() {
 			case "enter":
@@ -312,7 +287,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
 
-		// 4. SEARCHING MODE
 		case stateSearching:
 			switch msg.String() {
 			case "enter":
@@ -339,7 +313,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
 		
-		// 5. FILTER SELECTION MODE
 		case stateFilterSelection:
 			switch msg.String() {
 			case "enter":
@@ -363,8 +336,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	return m, tea.Batch(cmds...)
 }
-
-// --- View Rendering ---
 
 func (m model) View() string {
 	var hint string
@@ -427,7 +398,6 @@ func (m model) View() string {
 	return ""
 }
 
-// --- List Helper ---
 func findItemIndex(items []list.Item, id string) int {
 	for i, item := range items {
 		if f, ok := item.(filterItem); ok && f.id == id {
@@ -438,9 +408,6 @@ func findItemIndex(items []list.Item, id string) int {
 }
 
 
-// --- Helpers ---
-
-// getFiles lists files or directories in the given path, applying filters.
 func getFiles(dir string, dirsOnly bool, searchQuery string, showHidden bool) []list.Item {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -465,7 +432,6 @@ func getFiles(dir string, dirsOnly bool, searchQuery string, showHidden bool) []
 
 	for _, e := range entries {
         
-        // Correctly get os.FileInfo from os.DirEntry to access size
         info, err := e.Info()
 		if err != nil {
 			continue
@@ -473,14 +439,12 @@ func getFiles(dir string, dirsOnly bool, searchQuery string, showHidden bool) []
         
 		name := e.Name()
 		
-		// 1. Hidden File Filter
 		if !showHidden && strings.HasPrefix(name, ".") {
 			continue
 		}
         
 		if e.IsDir() {
 			if dirsOnly {
-				// 2. Search Query Filter for Directories
 				if searchQuery == "" || strings.Contains(strings.ToLower(name), query) {
 					items = append(items, item{
 						title:    name,
@@ -491,11 +455,9 @@ func getFiles(dir string, dirsOnly bool, searchQuery string, showHidden bool) []
 				}
 			}
 		} else if !dirsOnly {
-			// 3. Image File Type Filter
 			ext := strings.ToLower(filepath.Ext(name))
 			if ext == ".png" || ext == ".jpg" || ext == ".jpeg" {
 				
-				// 4. Search Query Filter for Image Files
 				if searchQuery == "" || strings.Contains(strings.ToLower(name), query) {
 					items = append(items, item{
 						title:    name,
@@ -511,44 +473,34 @@ func getFiles(dir string, dirsOnly bool, searchQuery string, showHidden bool) []
 	return items
 }
 
-// renderImage converts a local image file to an ASCII string, applying selected options
 func renderImage(path string, w, h int, filterMode string) (string, error) {
-	// 1. Setup default conversion options
 	convertOptions := convert.DefaultOptions
 	convertOptions.FixedWidth = w
 	convertOptions.FixedHeight = h
     
-    // Set up default options
     convertOptions.Colored = true
 	convertOptions.Reversed = false
     
     converter := convert.NewImageConverter()
 
-	// 2. Apply Filter Mode
 	switch filterMode {
 	case FilterColor:
-		// Default: Full Color, not reversed
 		convertOptions.Colored = true 
 		convertOptions.Reversed = false
 
 	case FilterGrayscale:
-		// Grayscale: Monochrome output, not reversed
 		convertOptions.Colored = false 
 		convertOptions.Reversed = false
         
 	case FilterDuotone:
-		// Duotone: High-contrast monochrome, inverted. This is visually distinct
-		// from Grayscale and Color and gives a stark black-and-white look.
 		convertOptions.Colored = false 
 		convertOptions.Reversed = true
         
 	case FilterInverted:
-		// FIX: Full Color (Colored = true), but reversed. This achieves the *color* negative effect.
 		convertOptions.Colored = true 
 		convertOptions.Reversed = true 
 	}
-	
-	// The converter returns the final ASCII string based on the options.
+
 	return converter.ImageFile2ASCIIString(path, &convertOptions), nil
 }
 
