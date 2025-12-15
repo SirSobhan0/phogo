@@ -2,22 +2,21 @@ package main
 
 import (
 	"fmt"
-	_ "image/jpeg" // Register JPEG decoder
-	_ "image/png"  // Register PNG decoder
+	_ "image/jpeg" 
+	_ "image/png"  
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/textinput" // Re-introduced for custom search
+	"github.com/charmbracelet/bubbles/textinput" 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/qeesung/image2ascii/convert"
 )
 
-// --- Enums & Styles ---
+// --- Enums, Constants, and Configuration ---
 
 type sessionState int
 
@@ -25,7 +24,17 @@ const (
 	stateBrowsing sessionState = iota 
 	stateViewingImage
 	stateDirBrowsing 
-	stateSearching   // Re-introduced state for dedicated search input
+	stateSearching   
+	stateFilterSelection 
+)
+
+// Configuration options for filters
+const (
+	// Filters
+	FilterColor    = "Color"
+	FilterGrayscale = "Grayscale"
+	FilterInverted = "Inverted"
+	FilterDuotone  = "Duotone" // High Contrast Monochrome
 )
 
 var (
@@ -42,9 +51,10 @@ var (
 	
 	dirStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#99CCFF"))
 	searchStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFCC66"))
+	filterTitleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF88FF"))
 )
 
-// --- Custom Items for the File List ---
+// --- Custom Items for the File List / Filter List ---
 
 type item struct {
 	title, desc string
@@ -61,20 +71,36 @@ func (i item) Title() string {
 func (i item) Description() string { return i.desc }
 func (i item) FilterValue() string { return i.title } 
 
+// --- Filter Item Struct ---
+
+type filterItem struct {
+	id string
+	desc string
+}
+
+func (f filterItem) Title() string { return f.id }
+func (f filterItem) Description() string { return f.desc }
+func (f filterItem) FilterValue() string { return f.id }
+
+
 // --- Main Model ---
 
 type model struct {
-	state        sessionState
-	list         list.Model
-	viewport     viewport.Model
-	searchInput  textinput.Model // Re-introduced
-	currentDir   string 
+	state          sessionState
+	list           list.Model
+	viewport       viewport.Model
+	searchInput    textinput.Model 
+	currentDir     string 
 	dirBrowserPath string
-	searchQuery  string // Re-introduced
-	showHidden   bool   
-	statusMsg    string
-	imgContent   string 
-	prevDirState sessionState // Re-introduced
+	searchQuery    string 
+	showHidden     bool   
+	statusMsg      string
+	imgContent     string 
+	prevDirState   sessionState 
+
+	// Filter fields
+	filterMode     string 
+	filterList     list.Model 
 }
 
 func initialModel() model {
@@ -84,12 +110,9 @@ func initialModel() model {
 	l := list.New(getFiles(currentDir, false, "", false), list.NewDefaultDelegate(), 0, 0)
 	l.Title = "Local Photo Viewer"
 	l.SetShowStatusBar(false)
-	
-	// CRITICAL FIX: Disable built-in filter AND clear its keybinding to remove the help text.
 	l.KeyMap.Filter.SetEnabled(false)
 	l.KeyMap.Filter.SetKeys() 
 	l.KeyMap.Quit.SetKeys("q", "ctrl+c")
-
 
 	// 2. Setup Search Input
 	ti := textinput.New()
@@ -101,7 +124,23 @@ func initialModel() model {
 	// 3. Setup Viewport 
 	vp := viewport.New(0, 0)
 
-	return model{
+	// 4. Setup Filter Selection List
+	fList := list.New([]list.Item{
+		filterItem{id: FilterColor, desc: "Renders the photo in full, true color."},
+		filterItem{id: FilterInverted, desc: "Renders the photo with inverted colors (negative effect)."},
+		filterItem{id: FilterGrayscale, desc: "Renders the photo in smooth shades of gray (monochrome)."},
+		filterItem{id: FilterDuotone, desc: "Renders the photo in high-contrast black and white (duotone effect)."},
+	}, list.NewDefaultDelegate(), 0, 0)
+	fList.Title = filterTitleStyle.Render("Select Image Filter (Press Enter)")
+	fList.SetShowFilter(false)
+	fList.SetShowStatusBar(false)
+	
+	d := list.NewDefaultDelegate()
+	d.Styles.SelectedTitle = d.Styles.SelectedTitle.Foreground(lipgloss.Color("#FFCC66"))
+	d.Styles.SelectedDesc = d.Styles.SelectedDesc.Foreground(lipgloss.Color("#FFCC66"))
+	fList.SetDelegate(d)
+
+	m := model{
 		state:        stateBrowsing,
 		list:         l,
 		viewport:     vp,
@@ -109,26 +148,29 @@ func initialModel() model {
 		currentDir:   currentDir,
 		dirBrowserPath: currentDir,
 		searchQuery:  "",
-		showHidden:   false, 
+		showHidden:   false,
+		filterMode:   FilterColor, 
+		filterList:   fList,
 	}
+
+	m.filterList.SetSize(40, 10)
+    
+    return m
 }
 
 func (m model) Init() tea.Cmd {
 	return nil
 }
 
-// --- Directory Setting Logic ---
+// --- Directory Setting Logic / List Reload Helpers ---
 
 func (m *model) finalizeDirectoryChange(newPath string) {
 	m.currentDir = newPath
-	// Keep search/hidden status active when changing dir for continuity
 	m.reloadImageList()
 	m.list.Title = "Local Photo Viewer (Dir: " + m.currentDir + ")"
 	m.statusMsg = "Working directory set to: " + m.currentDir
 	m.state = stateBrowsing
 }
-
-// --- List Reload Helper ---
 
 func (m *model) reloadImageList() {
 	m.list.SetItems(getFiles(m.currentDir, false, m.searchQuery, m.showHidden))
@@ -149,6 +191,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		h, v := appStyle.GetFrameSize()
+		// Adjust list size based on state (Search input takes up space)
 		if m.state == stateSearching {
 			m.list.SetSize(msg.Width-h, msg.Height-v-4)
 		} else {
@@ -156,6 +199,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.viewport.Width = msg.Width
 		m.viewport.Height = msg.Height - 3
+		m.filterList.SetSize(msg.Width/2, msg.Height - 10)
+
 
 	case tea.KeyMsg:
 		// Global quit/back (q/ctrl+c) logic remains
@@ -179,7 +224,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					itm := selectedItem.(item)
 					filePath := filepath.Join(m.currentDir, itm.fileName) 
 					
-					str, err := renderImage(filePath, m.viewport.Width, m.viewport.Height)
+					// Pass the filter mode
+					str, err := renderImage(filePath, m.viewport.Width, m.viewport.Height, m.filterMode)
 					if err != nil {
 						m.statusMsg = "Error: " + err.Error()
 					} else {
@@ -189,20 +235,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.state = stateViewingImage
 					}
 				}
-			case "d": // 'd' to enter directory browsing
+			case "d": 
 				m.state = stateDirBrowsing
 				m.reloadDirList()
 				return m, nil
-			case "/": // '/' to start searching (Custom mapping)
+			case "/": 
 				m.prevDirState = stateBrowsing
 				m.state = stateSearching
 				m.searchInput.SetValue(m.searchQuery)
 				m.searchInput.Focus()
 				return m, textinput.Blink
-			case "h": // 'h' to toggle hidden files
+			case "h": 
 				m.showHidden = !m.showHidden
 				m.reloadImageList()
 				m.statusMsg = fmt.Sprintf("Show Hidden Files: %t", m.showHidden)
+			case "f": // Key for filter selection
+				m.state = stateFilterSelection
+				m.filterList.Select(findItemIndex(m.filterList.Items(), m.filterMode))
+				return m, nil
 			}
 			m.list, cmd = m.list.Update(msg)
 			if cmd != nil {
@@ -210,7 +260,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 
-		// 2. IMAGE VIEWER MODE (Unchanged)
+		// 2. IMAGE VIEWER MODE
 		case stateViewingImage:
 			switch msg.String() {
 			case "esc":
@@ -245,13 +295,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "d", "esc":
 				m.finalizeDirectoryChange(m.dirBrowserPath)
 				return m, nil
-			case "/": // '/' to start searching from dir mode (Custom mapping)
+			case "/": 
 				m.prevDirState = stateDirBrowsing
 				m.state = stateSearching
 				m.searchInput.SetValue(m.searchQuery)
 				m.searchInput.Focus()
 				return m, textinput.Blink
-			case "h": // 'h' to toggle hidden files in dir mode
+			case "h": 
 				m.showHidden = !m.showHidden
 				m.reloadDirList()
 				m.statusMsg = fmt.Sprintf("Show Hidden Files: %t", m.showHidden)
@@ -288,6 +338,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cmd != nil {
 				cmds = append(cmds, cmd)
 			}
+		
+		// 5. FILTER SELECTION MODE
+		case stateFilterSelection:
+			switch msg.String() {
+			case "enter":
+				if f, ok := m.filterList.SelectedItem().(filterItem); ok {
+					m.filterMode = f.id
+				}
+				m.statusMsg = fmt.Sprintf("Filter: %s applied.", m.filterMode)
+				m.state = stateBrowsing
+				return m, nil
+			case "esc":
+				m.state = stateBrowsing
+				return m, nil
+			}
+			
+			m.filterList, cmd = m.filterList.Update(msg)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 	}
 
@@ -301,16 +371,19 @@ func (m model) View() string {
 	var hiddenStatus string
 	
 	if m.searchQuery != "" {
-		hint = searchStyle.Render(fmt.Sprintf(" [Active Search: \"%s\"]", m.searchQuery))
+		hint = searchStyle.Render(fmt.Sprintf(" [S: \"%s\"]", m.searchQuery))
 	}
 	if m.showHidden {
 		hiddenStatus = " (H: ON)"
 	}
+	
+	filterStatus := fmt.Sprintf(" [F: %s]", m.filterMode)
+
 
 	switch m.state {
 	case stateBrowsing:
 		return appStyle.Render(m.list.View() + "\n" + statusMessageStyle(m.statusMsg) + 
-			fmt.Sprintf("\n(Press 'd' to change dir, '/' to search, 'h' to toggle hidden)%s%s", hiddenStatus, hint))
+			fmt.Sprintf("\n(Press 'd' dir, '/' search, 'h' hidden, 'f' filter)%s%s%s", hiddenStatus, hint, filterStatus))
 
 	case stateViewingImage:
 		return fmt.Sprintf("%s\n%s\n%s",
@@ -342,9 +415,28 @@ func (m model) View() string {
 			inputContent,
 			m.list.View(),
 		))
+	
+	case stateFilterSelection:
+		msg := "Select an Image Filter. Press Enter to apply or ESC to cancel."
+		
+		return appStyle.Render(lipgloss.JoinVertical(lipgloss.Center,
+			msg,
+			m.filterList.View(),
+		))
 	}
 	return ""
 }
+
+// --- List Helper ---
+func findItemIndex(items []list.Item, id string) int {
+	for i, item := range items {
+		if f, ok := item.(filterItem); ok && f.id == id {
+			return i
+		}
+	}
+	return 0
+}
+
 
 // --- Helpers ---
 
@@ -372,7 +464,9 @@ func getFiles(dir string, dirsOnly bool, searchQuery string, showHidden bool) []
 	}
 
 	for _, e := range entries {
-		info, err := e.Info()
+        
+        // Correctly get os.FileInfo from os.DirEntry to access size
+        info, err := e.Info()
 		if err != nil {
 			continue
 		}
@@ -414,31 +508,47 @@ func getFiles(dir string, dirsOnly bool, searchQuery string, showHidden bool) []
 		}
 	}
     
-	// Sort results alphabetically
-	sort.Slice(items, func(i, j int) bool {
-		itemI := items[i].(item)
-		itemJ := items[j].(item)
-
-		if dirsOnly {
-			if itemI.title == ".." { return true }
-			if itemJ.title == ".." { return false }
-		}
-        
-		return itemI.title < itemJ.title
-	})
-
 	return items
 }
 
-// renderImage converts a local image file to an ASCII string
-func renderImage(path string, w, h int) (string, error) {
+// renderImage converts a local image file to an ASCII string, applying selected options
+func renderImage(path string, w, h int, filterMode string) (string, error) {
+	// 1. Setup default conversion options
 	convertOptions := convert.DefaultOptions
 	convertOptions.FixedWidth = w
 	convertOptions.FixedHeight = h
-	convertOptions.Colored = true 
+    
+    // Set up default options
+    convertOptions.Colored = true
+	convertOptions.Reversed = false
+    
+    converter := convert.NewImageConverter()
 
-	converter := convert.NewImageConverter()
+	// 2. Apply Filter Mode
+	switch filterMode {
+	case FilterColor:
+		// Default: Full Color, not reversed
+		convertOptions.Colored = true 
+		convertOptions.Reversed = false
+
+	case FilterGrayscale:
+		// Grayscale: Monochrome output, not reversed
+		convertOptions.Colored = false 
+		convertOptions.Reversed = false
+        
+	case FilterDuotone:
+		// Duotone: High-contrast monochrome, inverted. This is visually distinct
+		// from Grayscale and Color and gives a stark black-and-white look.
+		convertOptions.Colored = false 
+		convertOptions.Reversed = true
+        
+	case FilterInverted:
+		// FIX: Full Color (Colored = true), but reversed. This achieves the *color* negative effect.
+		convertOptions.Colored = true 
+		convertOptions.Reversed = true 
+	}
 	
+	// The converter returns the final ASCII string based on the options.
 	return converter.ImageFile2ASCIIString(path, &convertOptions), nil
 }
 
