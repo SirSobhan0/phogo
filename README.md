@@ -22,6 +22,12 @@ Download from [relaese page](https://github.com/SirSobhan0/phogo/releases)
 
 ||
 
+```bash
+go install github.com/SirSobhan0/phogo@latest
+```
+
+||
+
 Compile from source:
 
 Ensure you have [Go](https://go.dev/) installed, then:
