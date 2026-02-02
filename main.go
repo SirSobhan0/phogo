@@ -1,169 +1,201 @@
 package main
 
 import (
+	"flag"
 	"fmt"
-	_ "image/jpeg" 
-	_ "image/png"  
+	_ "image/jpeg"
+	_ "image/png"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/textinput" 
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/qeesung/image2ascii/convert"
 )
 
+// --- Types & Constants ---
+
 type sessionState int
 
 const (
-	stateBrowsing sessionState = iota 
+	stateBrowsing sessionState = iota
 	stateViewingImage
-	stateDirBrowsing 
-	stateSearching   
-	stateFilterSelection 
+	stateDirBrowsing
+	stateSearching
+	stateConfirmDelete
+	stateRenaming
 )
 
 const (
-	FilterColor    = "Color"
-	FilterGrayscale = "Grayscale"
-	FilterInverted = "Inverted"
-	FilterDuotone  = "Duotone"
+	SortName = iota
+	SortSize
+	SortDate
 )
 
+const (
+	FilterColor     = "Color"
+	FilterGrayscale = "Grayscale"
+	FilterInverted  = "Inverted"
+	FilterDuotone   = "Duotone"
+)
+
+type imageRenderedMsg string
+type tickMsg time.Time
+
+// --- Styles ---
+
 var (
-	appStyle = lipgloss.NewStyle().Padding(1, 2)
+	appStyle   = lipgloss.NewStyle().Padding(1, 2)
+	titleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFDF5")).Background(lipgloss.Color("#25A065")).Padding(0, 1)
+	alertStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFDF5")).Background(lipgloss.Color("#FF5555")).Padding(0, 1).Bold(true)
+	infoStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFDF5")).Background(lipgloss.Color("#61AFEF")).Padding(0, 1).Bold(true)
 
-	titleStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFFDF5")).
-			Background(lipgloss.Color("#25A065")).
-			Padding(0, 1)
-
-	statusMessageStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#A0A0A0")).
-				Render
-	
-	dirStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#99CCFF"))
-	searchStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFCC66"))
-	filterTitleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF88FF"))
+	helpKeyStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#25A065")).Bold(true)
+	helpDescStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#777777"))
+	dirStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#99CCFF"))
 )
 
 type item struct {
-	title, desc string
-	fileName    string
-	isDir       bool
+	title, fileName string
+	isDir           bool
+	size            int64
+	modTime         int64
 }
 
-func (i item) Title() string { 
-    if i.isDir {
-        return dirStyle.Render("📁 " + i.title)
-    }
-    return i.title
+func (i item) Title() string {
+	if i.isDir {
+		return dirStyle.Render("📁 " + i.title)
+	}
+	return i.title
 }
-func (i item) Description() string { return i.desc }
-func (i item) FilterValue() string { return i.title } 
-
-type filterItem struct {
-	id string
-	desc string
+func (i item) Description() string {
+	if i.isDir {
+		return "Directory"
+	}
+	return formatBytes(i.size)
 }
-
-func (f filterItem) Title() string { return f.id }
-func (f filterItem) Description() string { return f.desc }
-func (f filterItem) FilterValue() string { return f.id }
-
+func (i item) FilterValue() string { return i.title }
 
 type model struct {
-	state          sessionState
-	list           list.Model
-	viewport       viewport.Model
-	searchInput    textinput.Model 
-	currentDir     string 
-	dirBrowserPath string
-	searchQuery    string 
-	showHidden     bool   
-	statusMsg      string
-	imgContent     string 
-	prevDirState   sessionState 
-
-	filterMode     string 
-	filterList     list.Model 
+	state            sessionState
+	list             list.Model
+	viewport         viewport.Model
+	searchInput    textinput.Model
+	renameInput    textinput.Model
+	currentDir       string
+	dirBrowserPath   string
+	searchQuery    string
+	showHidden       bool
+	statusMsg        string
+	imgContent       string
+	isRendering    bool
+	isSlideshow    bool
+	prevDirState     sessionState
+	filterMode       string
+	sortMode         int
+	initialImagePath string
 }
 
-func initialModel() model {
-	currentDir, _ := os.Getwd()
-    
-	l := list.New(getFiles(currentDir, false, "", false), list.NewDefaultDelegate(), 0, 0)
-	l.Title = "Local Photo Viewer"
-	l.SetShowStatusBar(false)
-	l.KeyMap.Filter.SetEnabled(false)
-	l.KeyMap.Filter.SetKeys() 
-	l.KeyMap.Quit.SetKeys("q", "ctrl+c")
+// --- Helpers ---
 
-	ti := textinput.New()
-	ti.Placeholder = "Search files or folders..."
-	ti.Focus()
-	ti.CharLimit = 100
-	ti.Width = 30
-	
-	vp := viewport.New(0, 0)
+func copyToClipboard(content string) {
+	cmd := exec.Command("wl-copy")
+	cmd.Stdin = strings.NewReader(content)
+	_ = cmd.Run()
+}
 
-	fList := list.New([]list.Item{
-		filterItem{id: FilterColor, desc: "Renders the photo in full, true color."},
-		filterItem{id: FilterInverted, desc: "Renders the photo with inverted colors (negative effect)."},
-		filterItem{id: FilterGrayscale, desc: "Renders the photo in smooth shades of gray (monochrome)."},
-		filterItem{id: FilterDuotone, desc: "Renders the photo in high-contrast black and white."},
-	}, list.NewDefaultDelegate(), 0, 0)
-	fList.Title = filterTitleStyle.Render("Select Image Filter (Press Enter)")
-	fList.SetShowFilter(false)
-	fList.SetShowStatusBar(false)
-	
-	d := list.NewDefaultDelegate()
-	d.Styles.SelectedTitle = d.Styles.SelectedTitle.Foreground(lipgloss.Color("#FFCC66"))
-	d.Styles.SelectedDesc = d.Styles.SelectedDesc.Foreground(lipgloss.Color("#FFCC66"))
-	fList.SetDelegate(d)
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
 
-	m := model{
-		state:        stateBrowsing,
-		list:         l,
-		viewport:     vp,
-		searchInput:  ti,
-		currentDir:   currentDir,
-		dirBrowserPath: currentDir,
-		searchQuery:  "",
-		showHidden:   false,
-		filterMode:   FilterColor, 
-		filterList:   fList,
+func tick() tea.Cmd {
+	return tea.Tick(time.Second*5, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
+
+func renderImageCmd(path string, w, h int, mode string) tea.Cmd {
+	return func() tea.Msg {
+		return imageRenderedMsg(renderImage(path, w, h, mode))
+	}
+}
+
+func initialModel(startPath string) model {
+	absPath, _ := filepath.Abs(startPath)
+	fileInfo, err := os.Stat(absPath)
+	targetDir := absPath
+	targetImg := ""
+
+	if err == nil && !fileInfo.IsDir() {
+		targetDir = filepath.Dir(absPath)
+		targetImg = filepath.Base(absPath)
 	}
 
-	m.filterList.SetSize(40, 10)
-    
-    return m
+	l := list.New(getFiles(targetDir, false, "", false, SortName), list.NewDefaultDelegate(), 0, 0)
+	l.SetShowHelp(false)
+
+	l.SetShowStatusBar(false)
+	l.SetFilteringEnabled(false)
+	l.Styles.NoItems = lipgloss.NewStyle()
+	
+	l.KeyMap.NextPage = key.NewBinding(key.WithKeys("pgdown", "right"))
+	l.KeyMap.PrevPage = key.NewBinding(key.WithKeys("pgup", "left"))
+	l.KeyMap.CursorUp.SetKeys("up", "k")
+	l.KeyMap.CursorDown.SetKeys("down", "j")
+
+	return model{
+		state:            stateBrowsing,
+		list:             l,
+		viewport:         viewport.New(0, 0),
+		searchInput:      textinput.New(),
+		renameInput:      textinput.New(),
+		currentDir:       targetDir,
+		dirBrowserPath:   targetDir,
+		filterMode:       FilterColor,
+		sortMode:         SortName,
+		initialImagePath: targetImg,
+	}
 }
 
 func (m model) Init() tea.Cmd {
+	if m.initialImagePath != "" {
+		for i, itm := range m.list.Items() {
+			if itm.(item).fileName == m.initialImagePath {
+				m.list.Select(i)
+				break
+			}
+		}
+		path := filepath.Join(m.currentDir, m.initialImagePath)
+		return renderImageCmd(path, 120, 40, m.filterMode)
+	}
 	return nil
 }
 
-func (m *model) finalizeDirectoryChange(newPath string) {
-	m.currentDir = newPath
-	m.reloadImageList()
-	m.list.Title = "Local Photo Viewer (Dir: " + m.currentDir + ")"
-	m.statusMsg = "Working directory set to: " + m.currentDir
-	m.state = stateBrowsing
-}
-
 func (m *model) reloadImageList() {
-	m.list.SetItems(getFiles(m.currentDir, false, m.searchQuery, m.showHidden))
+	m.list.SetItems(getFiles(m.currentDir, false, m.searchQuery, m.showHidden, m.sortMode))
 }
 
 func (m *model) reloadDirList() {
-	m.list.SetItems(getFiles(m.dirBrowserPath, true, m.searchQuery, m.showHidden))
-	m.list.Title = "Select Directory (Path: " + m.dirBrowserPath + ")"
+	m.list.SetItems(getFiles(m.dirBrowserPath, true, m.searchQuery, m.showHidden, m.sortMode))
 }
-
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
@@ -171,343 +203,205 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		h, v := appStyle.GetFrameSize()
-		if m.state == stateSearching {
-			m.list.SetSize(msg.Width-h, msg.Height-v-4)
-		} else {
-			m.list.SetSize(msg.Width-h, msg.Height-v)
+		m.list.SetSize(msg.Width-4, msg.Height-10)
+		m.viewport.Width, m.viewport.Height = msg.Width, msg.Height-10
+		if m.initialImagePath != "" {
+			m.state, m.isRendering = stateViewingImage, true
+			m.initialImagePath = ""
+			return m, renderImageCmd(filepath.Join(m.currentDir, m.list.SelectedItem().(item).fileName), m.viewport.Width, m.viewport.Height, m.filterMode)
 		}
-		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - 3
-		m.filterList.SetSize(msg.Width/2, msg.Height - 10)
 
+	case imageRenderedMsg:
+		m.isRendering = false
+		m.imgContent = string(msg)
+		m.viewport.SetContent(m.imgContent)
+
+	case tickMsg:
+		if m.isSlideshow && m.state == stateViewingImage {
+			if m.list.Index() == len(m.list.Items())-1 {
+				m.list.Select(0)
+			} else {
+				m.list.CursorDown()
+			}
+			if itm, ok := m.list.SelectedItem().(item); ok {
+				path := filepath.Join(m.currentDir, itm.fileName)
+				return m, tea.Batch(tick(), renderImageCmd(path, m.viewport.Width, m.viewport.Height, m.filterMode))
+			}
+		}
+		return m, nil
 
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" || (msg.String() == "q" && m.state != stateSearching) {
-			if m.state != stateBrowsing {
-				m.state = stateBrowsing
-				m.statusMsg = ""
-				return m, nil
-			}
-			return m, tea.Quit
-		}
+		keyStr := msg.String()
+		if keyStr == "ctrl+c" { return m, tea.Quit }
+		if m.isSlideshow { m.isSlideshow = false; m.statusMsg = "Slideshow Stopped"; return m, nil }
 
 		switch m.state {
-
 		case stateBrowsing:
-			switch msg.String() {
+			switch keyStr {
+			case "q": return m, tea.Quit
 			case "enter":
-				selectedItem := m.list.SelectedItem()
-				if selectedItem != nil {
-					itm := selectedItem.(item)
-					filePath := filepath.Join(m.currentDir, itm.fileName) 
-					
-					str, err := renderImage(filePath, m.viewport.Width, m.viewport.Height, m.filterMode)
-					if err != nil {
-						m.statusMsg = "Error: " + err.Error()
-					} else {
-						m.imgContent = str
-						m.viewport.SetContent(str)
-						m.viewport.GotoTop()
-						m.state = stateViewingImage
-					}
+				if itm, ok := m.list.SelectedItem().(item); ok && !itm.isDir {
+					path := filepath.Join(m.currentDir, itm.fileName)
+					m.state, m.isRendering = stateViewingImage, true
+					return m, renderImageCmd(path, m.viewport.Width, m.viewport.Height, m.filterMode)
 				}
-			case "d": 
-				m.state = stateDirBrowsing
-				m.reloadDirList()
-				return m, nil
-			case "/": 
-				m.prevDirState = stateBrowsing
-				m.state = stateSearching
-				m.searchInput.SetValue(m.searchQuery)
-				m.searchInput.Focus()
-				return m, textinput.Blink
-			case "h": 
-				m.showHidden = !m.showHidden
-				m.reloadImageList()
-				m.statusMsg = fmt.Sprintf("Show Hidden Files: %t", m.showHidden)
-			case "f": 
-				m.state = stateFilterSelection
-				m.filterList.Select(findItemIndex(m.filterList.Items(), m.filterMode))
-				return m, nil
+			case "P":
+				if itm, ok := m.list.SelectedItem().(item); ok && !itm.isDir {
+					m.isSlideshow, m.state, m.isRendering = true, stateViewingImage, true
+					return m, tea.Batch(tick(), renderImageCmd(filepath.Join(m.currentDir, itm.fileName), m.viewport.Width, m.viewport.Height, m.filterMode))
+				}
+			case "d": m.state = stateDirBrowsing; m.reloadDirList()
+			case "x": m.state = stateConfirmDelete
+			case "r":
+				if itm, ok := m.list.SelectedItem().(item); ok {
+					m.state = stateRenaming
+					m.renameInput.SetValue(itm.fileName)
+					m.renameInput.Focus()
+				}
+			case "s": m.sortMode = (m.sortMode + 1) % 3; m.reloadImageList()
+			case "y":
+				if itm, ok := m.list.SelectedItem().(item); ok {
+					path, _ := filepath.Abs(filepath.Join(m.currentDir, itm.fileName))
+					copyToClipboard(path); m.statusMsg = "Path Copied!"
+				}
+			case "h": m.showHidden = !m.showHidden; m.reloadImageList()
+			case "/": m.state, m.prevDirState = stateSearching, stateBrowsing; m.searchInput.Focus()
 			}
-			m.list, cmd = m.list.Update(msg)
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-
+			m.list, cmd = m.list.Update(msg); cmds = append(cmds, cmd)
 
 		case stateViewingImage:
-			switch msg.String() {
-			case "esc":
-				m.state = stateBrowsing
+			switch keyStr {
+			case "esc", "q": m.state, m.statusMsg = stateBrowsing, ""
+			case "1", "2", "3", "4":
+				modes := []string{FilterColor, FilterGrayscale, FilterInverted, FilterDuotone}
+				idx, _ := strconv.Atoi(keyStr)
+				m.filterMode, m.isRendering = modes[idx-1], true
+				path := filepath.Join(m.currentDir, m.list.SelectedItem().(item).fileName)
+				return m, renderImageCmd(path, m.viewport.Width, m.viewport.Height, m.filterMode)
 			}
-			m.viewport, cmd = m.viewport.Update(msg)
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-            
+			m.viewport, cmd = m.viewport.Update(msg); cmds = append(cmds, cmd)
+
 		case stateDirBrowsing:
-			switch msg.String() {
-			case "enter":
-				selectedItem := m.list.SelectedItem()
-				if selectedItem != nil {
-					itm := selectedItem.(item)
-					
-					newPath := ""
-					if itm.fileName == ".." {
-						newPath = filepath.Dir(m.dirBrowserPath)
-					} else {
-						newPath = filepath.Join(m.dirBrowserPath, itm.fileName)
-					}
-					
-					info, err := os.Stat(newPath)
-					if err == nil && info.IsDir() {
-						m.dirBrowserPath = newPath 
-						m.reloadDirList() 
+			if keyStr == "enter" {
+				if itm, ok := m.list.SelectedItem().(item); ok {
+					newP := filepath.Join(m.dirBrowserPath, itm.fileName)
+					if itm.fileName == ".." { newP = filepath.Dir(m.dirBrowserPath) }
+					if info, err := os.Stat(newP); err == nil && info.IsDir() {
+						m.dirBrowserPath = newP; m.reloadDirList()
 					}
 				}
-			case "d", "esc":
-				m.finalizeDirectoryChange(m.dirBrowserPath)
-				return m, nil
-			case "/": 
-				m.prevDirState = stateDirBrowsing
-				m.state = stateSearching
-				m.searchInput.SetValue(m.searchQuery)
-				m.searchInput.Focus()
-				return m, textinput.Blink
-			case "h": 
-				m.showHidden = !m.showHidden
-				m.reloadDirList()
-				m.statusMsg = fmt.Sprintf("Show Hidden Files: %t", m.showHidden)
-			}
-			
-			m.list, cmd = m.list.Update(msg)
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
+			} else if keyStr == "d" { m.currentDir, m.state = m.dirBrowserPath, stateBrowsing; m.reloadImageList()
+			} else if keyStr == "h" { m.showHidden = !m.showHidden; m.reloadDirList()
+			} else if keyStr == "esc" { m.state = stateBrowsing }
+			m.list, cmd = m.list.Update(msg); cmds = append(cmds, cmd)
 
 		case stateSearching:
-			switch msg.String() {
-			case "enter":
-				m.searchQuery = m.searchInput.Value()
-				m.state = m.prevDirState 
-				
-				if m.state == stateDirBrowsing {
-					m.reloadDirList()
-					m.statusMsg = fmt.Sprintf("Search applied to directories: \"%s\"", m.searchQuery)
-				} else {
-					m.reloadImageList()
-					m.statusMsg = fmt.Sprintf("Search applied to images: \"%s\"", m.searchQuery)
-				}
-				m.list.SetSize(m.viewport.Width, m.viewport.Height) 
-				return m, nil
-			case "esc":
-				m.state = m.prevDirState 
-				m.list.SetSize(m.viewport.Width, m.viewport.Height) 
-				return m, nil
-			}
-			
-			m.searchInput, cmd = m.searchInput.Update(msg)
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		
-		case stateFilterSelection:
-			switch msg.String() {
-			case "enter":
-				if f, ok := m.filterList.SelectedItem().(filterItem); ok {
-					m.filterMode = f.id
-				}
-				m.statusMsg = fmt.Sprintf("Filter: %s applied.", m.filterMode)
-				m.state = stateBrowsing
-				return m, nil
-			case "esc":
-				m.state = stateBrowsing
-				return m, nil
-			}
-			
-			m.filterList, cmd = m.filterList.Update(msg)
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
+			if keyStr == "enter" {
+				m.searchQuery, m.state = m.searchInput.Value(), m.prevDirState
+				if m.state == stateDirBrowsing { m.reloadDirList() } else { m.reloadImageList() }
+			} else if keyStr == "esc" { m.state = m.prevDirState }
+			m.searchInput, cmd = m.searchInput.Update(msg); cmds = append(cmds, cmd)
+
+		case stateRenaming:
+			if keyStr == "enter" {
+				os.Rename(filepath.Join(m.currentDir, m.list.SelectedItem().(item).fileName), filepath.Join(m.currentDir, m.renameInput.Value()))
+				m.state = stateBrowsing; m.reloadImageList()
+			} else if keyStr == "esc" { m.state = stateBrowsing }
+			m.renameInput, cmd = m.renameInput.Update(msg); cmds = append(cmds, cmd)
+
+		case stateConfirmDelete:
+			if keyStr == "y" { os.Remove(filepath.Join(m.currentDir, m.list.SelectedItem().(item).fileName)); m.reloadImageList() }
+			m.state = stateBrowsing
 		}
 	}
-
 	return m, tea.Batch(cmds...)
 }
 
 func (m model) View() string {
-	var hint string
-	var hiddenStatus string
-	
-	if m.searchQuery != "" {
-		hint = searchStyle.Render(fmt.Sprintf(" [S: \"%s\"]", m.searchQuery))
-	}
-	if m.showHidden {
-		hiddenStatus = " (H: ON)"
-	}
-	
-	filterStatus := fmt.Sprintf(" [F: %s]", m.filterMode)
-
+	sortNames := []string{"Name", "Size", "Date"}
+	status := fmt.Sprintf("Sort: %s | Hidden: %v", sortNames[m.sortMode], m.showHidden)
+	if m.isSlideshow { status = "SLIDESHOW LOOPING (Any key to stop)" }
 
 	switch m.state {
 	case stateBrowsing:
-		return appStyle.Render(m.list.View() + "\n" + statusMessageStyle(m.statusMsg) + 
-			fmt.Sprintf("\n(Press 'd' dir, '/' search, 'h' hidden, 'f' filter)%s%s%s", hiddenStatus, hint, filterStatus))
-
+		return appStyle.Render(fmt.Sprintf("%s | %s\n%s\n\n%s\n%s", titleStyle.Render("phogo"), status, m.currentDir, m.list.View(), m.renderHelp([]string{"j/k", "move", "P", "slide", "s", "sort", "y", "path", "r", "name", "x", "del", "h", "hide", "/", "find"})))
 	case stateViewingImage:
-		return fmt.Sprintf("%s\n%s\n%s",
-			titleStyle.Render("Image Viewer (Press 'q' or 'esc' to back)"),
-			m.viewport.View(),
-			statusMessageStyle(m.statusMsg),
-		)
-        
+		content := m.viewport.View()
+		if m.isRendering { content = "\n\n  Rendering..." }
+		return fmt.Sprintf("%s\n%s\n%s", titleStyle.Render("Image View"), content, m.renderHelp([]string{"1-4", "filter", "esc", "back"}))
 	case stateDirBrowsing:
-		return appStyle.Render(
-			fmt.Sprintf("%s\n%s",
-				m.list.View(),
-				statusMessageStyle("Navigate to folder and press 'd' or 'esc' to set it.") + 
-				fmt.Sprintf("\n(Enter to navigate, '/' to search, 'h' to toggle hidden)%s%s", hiddenStatus, hint),
-			),
-		)
-	
-	case stateSearching:
-		searchScope := "Images"
-		if m.prevDirState == stateDirBrowsing {
-			searchScope = "Directories"
-		}
-
-		inputContent := m.searchInput.View()
-		
-		return appStyle.Render(fmt.Sprintf(
-			"Search %s (Press Enter to apply, Esc to cancel):\n\n%s\n%s",
-			searchScope,
-			inputContent,
-			m.list.View(),
-		))
-	
-	case stateFilterSelection:
-		msg := "Select an Image Filter. Press Enter to apply or ESC to cancel."
-		
-		return appStyle.Render(lipgloss.JoinVertical(lipgloss.Center,
-			msg,
-			m.filterList.View(),
-		))
+		return appStyle.Render(fmt.Sprintf("%s\n%s\n\n%s\n%s", titleStyle.Render("FOLDERS"), m.dirBrowserPath, m.list.View(), m.renderHelp([]string{"j/k", "move", "enter", "open", "d", "set", "h", "hide", "esc", "back"})))
+	case stateSearching, stateRenaming, stateConfirmDelete:
+		prompt := "SEARCH"; input := m.searchInput.View()
+		if m.state == stateRenaming { prompt, input = "RENAME", m.renameInput.View() }
+		if m.state == stateConfirmDelete { prompt, input = "DELETE?", m.renderHelp([]string{"y", "yes", "n", "no"}) }
+		return appStyle.Render(infoStyle.Render(prompt) + "\n" + input)
 	}
 	return ""
 }
 
-func findItemIndex(items []list.Item, id string) int {
-	for i, item := range items {
-		if f, ok := item.(filterItem); ok && f.id == id {
-			return i
-		}
-	}
-	return 0
+func (m model) renderHelp(keys []string) string {
+	var h []string
+	for i := 0; i < len(keys); i += 2 { h = append(h, fmt.Sprintf("%s %s", helpKeyStyle.Render(keys[i]), helpDescStyle.Render(keys[i+1]))) }
+	return "\n" + strings.Join(h, " • ") + "\n" + m.statusMsg
 }
 
-
-func getFiles(dir string, dirsOnly bool, searchQuery string, showHidden bool) []list.Item {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return []list.Item{item{title: "Error reading directory", desc: err.Error()}}
-	}
-    
-	var items []list.Item
+func getFiles(dir string, dirsOnly bool, searchQuery string, showHidden bool, sortMode int) []list.Item {
+	entries, _ := os.ReadDir(dir)
+	var items []item
 	query := strings.ToLower(searchQuery)
-
-	if dirsOnly {
-		absPath, _ := filepath.Abs(dir)
-		parentDir := filepath.Dir(absPath)
-		if absPath != parentDir { 
-			items = append(items, item{
-				title:    "..",
-				desc:     "Go up one directory",
-				fileName: "..",
-				isDir:    true,
-			})
-		}
-	}
-
+	if dirsOnly { items = append(items, item{title: "..", fileName: "..", isDir: true}) }
 	for _, e := range entries {
-        
-        info, err := e.Info()
-		if err != nil {
-			continue
-		}
-        
 		name := e.Name()
-		
-		if !showHidden && strings.HasPrefix(name, ".") {
-			continue
-		}
-        
+		if !showHidden && strings.HasPrefix(name, ".") { continue }
+		if searchQuery != "" && !strings.Contains(strings.ToLower(name), query) { continue }
+		info, _ := e.Info()
+		itm := item{title: name, fileName: name, isDir: e.IsDir(), size: info.Size(), modTime: info.ModTime().Unix()}
 		if e.IsDir() {
-			if dirsOnly {
-				if searchQuery == "" || strings.Contains(strings.ToLower(name), query) {
-					items = append(items, item{
-						title:    name,
-						desc:     "Directory",
-						fileName: name,
-						isDir:    true,
-					})
-				}
-			}
+			if dirsOnly { items = append(items, itm) }
 		} else if !dirsOnly {
 			ext := strings.ToLower(filepath.Ext(name))
-			if ext == ".png" || ext == ".jpg" || ext == ".jpeg" {
-				
-				if searchQuery == "" || strings.Contains(strings.ToLower(name), query) {
-					items = append(items, item{
-						title:    name,
-						desc:     fmt.Sprintf("%d bytes", info.Size()),
-						fileName: name,
-						isDir:    false,
-					})
-				}
-			}
+			if ext == ".png" || ext == ".jpg" || ext == ".jpeg" { items = append(items, itm) }
 		}
 	}
-    
-	return items
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].title == ".." { return true }; if items[j].title == ".." { return false }
+		switch sortMode {
+		case SortSize: return items[i].size > items[j].size
+		case SortDate: return items[i].modTime > items[j].modTime
+		default: return strings.ToLower(items[i].title) < strings.ToLower(items[j].title)
+		}
+	})
+	var res []list.Item
+	for _, itm := range items { res = append(res, itm) }
+	return res
 }
 
-func renderImage(path string, w, h int, filterMode string) (string, error) {
-	convertOptions := convert.DefaultOptions
-	convertOptions.FixedWidth = w
-	convertOptions.FixedHeight = h
-    
-    convertOptions.Colored = true
-	convertOptions.Reversed = false
-    
-    converter := convert.NewImageConverter()
-
+func renderImage(path string, w, h int, filterMode string) string {
+	opts := convert.DefaultOptions
+	opts.FixedWidth, opts.FixedHeight = w, h
 	switch filterMode {
-	case FilterColor:
-		convertOptions.Colored = true 
-		convertOptions.Reversed = false
-
-	case FilterGrayscale:
-		convertOptions.Colored = false 
-		convertOptions.Reversed = false
-        
-	case FilterDuotone:
-		convertOptions.Colored = false 
-		convertOptions.Reversed = true
-        
-	case FilterInverted:
-		convertOptions.Colored = true 
-		convertOptions.Reversed = true 
+	case FilterColor: opts.Colored, opts.Reversed = true, false
+	case FilterGrayscale: opts.Colored, opts.Reversed = false, false
+	case FilterDuotone: opts.Colored, opts.Reversed = false, true
+	case FilterInverted: opts.Colored, opts.Reversed = true, true
 	}
-
-	return converter.ImageFile2ASCIIString(path, &convertOptions), nil
+	return convert.NewImageConverter().ImageFile2ASCIIString(path, &opts)
 }
 
 func main() {
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		fmt.Printf("Error: %v", err)
-		os.Exit(1)
+	isConvert := flag.Bool("convert", false, "Spit out ASCII to stdout and exit")
+	flag.Parse()
+	args := flag.Args()
+
+	startPath := "."
+	if len(args) > 0 { startPath = args[0] }
+
+	if *isConvert {
+		fmt.Print(renderImage(startPath, 80, 40, FilterColor))
+		os.Exit(0)
 	}
+
+	p := tea.NewProgram(initialModel(startPath), tea.WithAltScreen())
+	if _, err := p.Run(); err != nil { os.Exit(1) }
 }
